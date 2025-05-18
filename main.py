@@ -3,13 +3,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 from discord.ext import commands, tasks
-from datetime import datetime, timezone
-import aiosqlite
 from datetime import datetime, timedelta, timezone
+import aiosqlite
 import os
 import asyncio
-from aiohttp import web
+from flask import Flask
+from threading import Thread
 
+# --- FLASK SETUP ---
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is alive!", 200
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# --- DISCORD BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -32,7 +43,6 @@ async def setup_database():
         """)
         await db.commit()
 
-
 async def update_activity(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -43,12 +53,11 @@ async def update_activity(user_id):
         """, (user_id, datetime.now(timezone.utc).isoformat()))
         await db.commit()
 
-
 async def get_last_active(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-                "SELECT last_active FROM activity WHERE user_id = ?",
-            (user_id, )) as cursor:
+            "SELECT last_active FROM activity WHERE user_id = ?", (user_id,)
+        ) as cursor:
             row = await cursor.fetchone()
             if row:
                 last_active = datetime.fromisoformat(row[0])
@@ -59,15 +68,12 @@ async def get_last_active(user_id):
 
 
 # --- BOT EVENTS ---
-
-
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
     await update_activity(message.author.id)
     await bot.process_commands(message)
-
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -76,8 +82,6 @@ async def on_voice_state_update(member, before, after):
 
 
 # --- INACTIVITY CHECK LOOP ---
-
-
 @tasks.loop(hours=10)
 async def check_inactive_members():
     now = datetime.now(timezone.utc)
@@ -86,8 +90,7 @@ async def check_inactive_members():
     for guild in bot.guilds:
         inactive_role = discord.utils.get(guild.roles, name="Inactive")
         if not inactive_role:
-            inactive_role = await guild.create_role(
-                name="Inactive", reason="Inactive role created")
+            inactive_role = await guild.create_role(name="Inactive", reason="Inactive role created")
 
         for member in guild.members:
             if member.bot:
@@ -97,30 +100,20 @@ async def check_inactive_members():
             if last_active is None or last_active < threshold:
                 if inactive_role not in member.roles:
                     try:
-                        print(
-                            f"Marking {member} as Inactive (last_active={last_active})"
-                        )
-                        await member.add_roles(inactive_role,
-                                               reason="Inactive for 30+ days")
+                        print(f"Marking {member} as Inactive (last_active={last_active})")
+                        await member.add_roles(inactive_role, reason="Inactive for 30+ days")
                     except discord.Forbidden:
-                        print(
-                            f"⚠️ No permission to add Inactive role to {member}"
-                        )
+                        print(f"⚠️ No permission to add Inactive role to {member}")
             else:
                 if inactive_role in member.roles:
                     try:
                         print(f"Removing Inactive from {member}")
-                        await member.remove_roles(
-                            inactive_role, reason="User is active again")
+                        await member.remove_roles(inactive_role, reason="User is active again")
                     except discord.Forbidden:
-                        print(
-                            f"⚠️ No permission to remove Inactive role from {member}"
-                        )
+                        print(f"⚠️ No permission to remove Inactive role from {member}")
 
 
-# --- ADMIN COMMAND TO MARK ALL MEMBERS ACTIVE ---
-
-
+# --- ADMIN COMMANDS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def mark_active(ctx):
@@ -129,57 +122,36 @@ async def mark_active(ctx):
             await update_activity(member.id)
     await ctx.send("✅ All members have been marked as active.")
 
-
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def last_actives(ctx, limit: int = 10):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-                "SELECT user_id, last_active FROM activity ORDER BY last_active ASC LIMIT ?",
-            (limit, )) as cursor:
+            "SELECT user_id, last_active FROM activity ORDER BY last_active ASC LIMIT ?", (limit,)
+        ) as cursor:
             rows = await cursor.fetchall()
             msg = "UserID | Last Active\n"
             for user_id, last_active in rows:
                 msg += f"{user_id} | {last_active}\n"
             await ctx.send(f"```{msg}```")
 
-
 @bot.command()
 async def ping(ctx):
     await ctx.send("Pong! Bot is working.")
 
 
-async def handle_ping(request):
-    return web.Response(text="Bot is alive!")
-
-
-async def start_webserver():
-    app = web.Application()
-    app.add_routes([web.get('/', handle_ping)])
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-
-    print("✅ Webserver started on http://0.0.0.0:8080")
-
-
+# --- READY EVENT ---
 @bot.event
 async def on_ready():
     print(f'✅ Logged in as {bot.user}')
     await setup_database()
     check_inactive_members.start()
 
-    # Start the webserver in the background
-    bot.loop.create_task(start_webserver())
 
-
-# --- Start Bot ---
-token = os.getenv("DISCORD_TOKEN")
-if token is None:
-    raise ValueError(
-        "DISCORD_TOKEN environment variable not found. Please set it in Replit Secrets."
-    )
-bot.run(token)
+# --- RUN EVERYTHING ---
+if __name__ == "__main__":
+    Thread(target=run_flask).start()
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("DISCORD_TOKEN environment variable not set.")
+    bot.run(token)
